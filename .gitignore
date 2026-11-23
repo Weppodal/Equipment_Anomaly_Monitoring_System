@@ -1,0 +1,30 @@
+# Виртуальное окружение
+.venv/
+
+# Кэш и скомпилированне файлы Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Секреты и переменные окружения (обязательно по п. 11 ТЗ!)
+.env
+.env.local
+*.pem
+*.key
+
+# Настройки IDE и редакторов (VS Code, PyCharm)
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Системные файлы Windows и macOS/Linux
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Логи и временные файлы БД / Docker
+*.log
+*.sqlite3
+postgres_data/
