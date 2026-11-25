@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+jinja2
+pandas
+numpy
+scikit-learn
+plotly
+
