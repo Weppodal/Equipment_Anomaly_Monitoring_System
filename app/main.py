@@ -1,9 +1,8 @@
 import io
 import os
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -36,9 +35,9 @@ def validate_telemetry_csv(content: bytes):
     # Проверка явных единиц измерения (Ошибка Е-04)
     # Проверяем опциональную колонку temperature_unit (если она есть в файле)
     if "temperature_unit" in df.columns:
-        bad_units = df[df["temperature_unit"].astype(str).str.strip() != "C"]
+        bad_units = df[df["temperature_unit"].astype(str).str.strip().str.upper() != "C"]
         if not bad_units.empty:
-            wrong_u = bad_units["temperature_unit"].iloc
+            wrong_u = bad_units["temperature_unit"].iloc[0]
             return None, (
                 f"Ошибка Е-04 (Другая единица измерения): для температуры указана единица '{wrong_u}', "
                 "ожидается шкала Цельсия ('C')."
@@ -53,11 +52,11 @@ def validate_telemetry_csv(content: bytes):
     # Проверка повторных меток времени
     dup_mask = df["timestamp"].duplicated(keep="first")
     if dup_mask.any():
-        first_dup_ts = df.loc[dup_mask, "timestamp"].min().strftime("%Y-%m-%d %H:%M:%S")
+        dup_ts = ', '.join(ts.strftime("%Y-%m-%d %H:%M:%S") for ts in df.loc[dup_mask, 'timestamp'])
         dup_count = int(dup_mask.sum())
         return None, (
             f"Ошибка временных меток (Сценарий П-03): обнаружены повторяющиеся метки времени "
-            f"({dup_count} дубл., первое совпадение: {first_dup_ts})."
+            f"({dup_count} дубл., повторяющиеся метки: {dup_ts})."
         )
 
     df = df.sort_values("timestamp").reset_index(drop=True)
@@ -66,6 +65,8 @@ def validate_telemetry_csv(content: bytes):
     cols_with_nan = []
     nan_rows_mask = df["device_id"].isna()  # учитываем пропуски и в device_id
 
+    error_text = []
+
     for col in NUMERIC_COLUMNS:
         non_null_mask = df[col].notna()
         converted = pd.to_numeric(df[col], errors="coerce")
@@ -73,13 +74,13 @@ def validate_telemetry_csv(content: bytes):
         # Если ячейка была не пустой, но после to_numeric стала NaN — значит там текст/мусор
         invalid_type_mask = non_null_mask & converted.isna()
         if invalid_type_mask.any():
-            bad_idx = df[invalid_type_mask].index.min()
-            bad_val = df.loc[bad_idx, col]
-            bad_ts = df.loc[bad_idx, "timestamp"].strftime("%Y-%m-%d %H:%M:%S")
-            return None, (
-                f"Ошибка типа данных: некорректное числовое значение '{bad_val}' в колонке '{col}' "
-                f"(время записи: {bad_ts})."
-            )
+            bad_ids = df[invalid_type_mask].index
+            bad_values_text = [
+                f"{df.loc[bad_idx, col]} (время: {df.loc[bad_idx, 'timestamp'].strftime('%Y-%m-%d %H:%M:%S')})"
+                for bad_idx in bad_ids
+            ]
+            error_text.append(f"Ошибка типа данных: некорректное числовое значение '{', '.join(bad_values_text)}' в колонке '{col}'")
+            continue
 
         # Сохраняем уже очищенную числовую колонку и фиксируем пустые ячейки (NaN)
         df[col] = converted
@@ -87,6 +88,9 @@ def validate_telemetry_csv(content: bytes):
         if nan_count > 0:
             cols_with_nan.append(f"{col} ({nan_count} шт.)")
             nan_rows_mask = nan_rows_mask | df[col].isna()
+
+    if len(error_text) > 0:
+        return None, "\n".join(error_text)
 
     if nan_rows_mask.any():
         if df["device_id"].isna().any():
@@ -101,6 +105,16 @@ def validate_telemetry_csv(content: bytes):
             f"(время: {time_info})."
         )
 
+    # Проверяем значение температуры, даже если есть колонка единиц измерения температуры и там написано "С", если нету этой колонки, по умолчанию считаем в Цельсиях
+    if (df["temperature"] > 150).any() or (df["temperature"] < -50).any():
+        bad_temp_idx = df[(df["temperature"] > 150) | (df["temperature"] < -50)].index.min()
+        bad_temp = df.at[bad_temp_idx, "temperature"]
+        bad_ts = df.at[bad_temp_idx, "timestamp"].strftime("%Y-%m-%d %H:%M:%S")
+        return None, (
+            f"Ошибка Е-04 (Некорректная шкала температуры): значение {bad_temp} (в {bad_ts}) "
+            "выходит за допустимый диапазон для градусов Цельсия (-50..150 °C). Возможно, данные переданы в Кельвинах или Фаренгейтах."
+        )
+
     # 5. Проверка разрывов (Ошибка Е-03)
     diffs = df["timestamp"].diff().dropna()
     max_gap = diffs.max()
@@ -109,7 +123,7 @@ def validate_telemetry_csv(content: bytes):
         t_before = df.loc[gap_idx - 1, "timestamp"].strftime("%Y-%m-%d %H:%M:%S")
         t_after = df.loc[gap_idx, "timestamp"].strftime("%Y-%m-%d %H:%M:%S")
         return None, (
-            f"Ошибка Е-03 (Длинный период без данных): обнаружен разрыв телеметрии длиной {int(max_gap.total_seconds() // 60)} мин."
+            f"Ошибка Е-03 (Длинный период без данных): обнаружен разрыв телеметрии длиной {int(max_gap.total_seconds() // 60)} мин. "
             f"(отсутствуют данные с {t_before} по {t_after})."
         )
 

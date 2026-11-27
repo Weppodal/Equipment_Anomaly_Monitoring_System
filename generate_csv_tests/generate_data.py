@@ -34,10 +34,10 @@ df = pd.DataFrame({
     "timestamp": timestamps,
     "device_id": device_id,
     "temperature": np.round(temperature, 2),
-    "temperature_unit": "C",
     "vibration": np.round(vibration, 3),
     "current": np.round(current, 2),
     "pressure": np.round(pressure, 2),
+    "temperature_unit": "C",
 })
 
 # Список для накопления эталонных событий
@@ -136,8 +136,15 @@ df_ts_dup.to_csv(os.path.join(FIXTURES_DIR, "err_05_duplicate_timestamps.csv"), 
 # Н-06: Некорректные числовые значения (текстовый мусор вместо цифры)
 df_bad_num = df.copy()
 df_bad_num["temperature"] = df_bad_num["temperature"].astype(object)
+df_bad_num["current"] = df_bad_num["current"].astype(object)
 df_bad_num.at[2500, "temperature"] = "sensor_err"
+df_bad_num.at[3655, "current"] = "12.5current"
 df_bad_num.to_csv(os.path.join(FIXTURES_DIR, "err_06_invalid_numbers.csv"), index=False)
+
+# Н-07: Неявная ошибка единиц измерения (колонка temperature_unit отсутствует, но значения в Кельвинах)
+df_implicit_units = df.drop(columns=["temperature_unit"]).copy()
+df_implicit_units["temperature"] = np.round(df_implicit_units["temperature"] + 273.15, 2)
+df_implicit_units.to_csv(os.path.join(FIXTURES_DIR, "err_07_implicit_kelvin.csv"), index=False)
 
 print(f"Готово! Файлы сохранены в папку {FIXTURES_DIR}")
 
