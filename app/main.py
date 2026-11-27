@@ -12,7 +12,9 @@ app = FastAPI(title="Мониторинг аномалий оборудован�
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
-REQUIRED_COLUMNS = ["timestamp", "device_id", "temperature", "vibration", "current", "pressure"]
+NUMERIC_COLUMNS = ["temperature", "vibration", "current", "pressure"]
+
+REQUIRED_COLUMNS = ["timestamp", "device_id", *NUMERIC_COLUMNS]
 
 
 def validate_telemetry_csv(content: bytes):
@@ -31,32 +33,75 @@ def validate_telemetry_csv(content: bytes):
     if len(df) == 0:
         return None, "Файл пуст (0 записей)."
 
+    # Проверка явных единиц измерения (Ошибка Е-04)
+    # Проверяем опциональную колонку temperature_unit (если она есть в файле)
+    if "temperature_unit" in df.columns:
+        bad_units = df[df["temperature_unit"].astype(str).str.strip() != "C"]
+        if not bad_units.empty:
+            wrong_u = bad_units["temperature_unit"].iloc
+            return None, (
+                f"Ошибка Е-04 (Другая единица измерения): для температуры указана единица '{wrong_u}', "
+                "ожидается шкала Цельсия ('C')."
+            )
+
     # 3. Проверка формата временных меток
     try:
         df["timestamp"] = pd.to_datetime(df["timestamp"], format="%Y-%m-%d %H:%M:%S")
     except Exception:
         return None, "Ошибка формата времени: колонка timestamp должна соответствовать ГГГГ-ММ-ДД ЧЧ:ММ:СС."
 
+    # Проверка повторных меток времени
+    dup_mask = df["timestamp"].duplicated(keep="first")
+    if dup_mask.any():
+        first_dup_ts = df.loc[dup_mask, "timestamp"].min().strftime("%Y-%m-%d %H:%M:%S")
+        dup_count = int(dup_mask.sum())
+        return None, (
+            f"Ошибка временных меток (Сценарий П-03): обнаружены повторяющиеся метки времени "
+            f"({dup_count} дубл., первое совпадение: {first_dup_ts})."
+        )
+
     df = df.sort_values("timestamp").reset_index(drop=True)
 
-    # 4. Проверка пропусков и NaN (Ошибка Е-02)
-    nan_mask = df[REQUIRED_COLUMNS].isna().any(axis=1)
-    if nan_mask.any():
-        nan_counts = df[REQUIRED_COLUMNS].isna().sum()
-        cols_with_nan = nan_counts[nan_counts > 0]
-        details = ", ".join([f"{col} ({cnt} шт.)" for col, cnt in cols_with_nan.items()])
+    # Проверка пропусков и NaN, некорректных значений (Ошибка Е-02)
+    cols_with_nan = []
+    nan_rows_mask = df["device_id"].isna()  # учитываем пропуски и в device_id
 
-        nan_times = df.loc[nan_mask, "timestamp"]
+    for col in NUMERIC_COLUMNS:
+        non_null_mask = df[col].notna()
+        converted = pd.to_numeric(df[col], errors="coerce")
+
+        # Если ячейка была не пустой, но после to_numeric стала NaN — значит там текст/мусор
+        invalid_type_mask = non_null_mask & converted.isna()
+        if invalid_type_mask.any():
+            bad_idx = df[invalid_type_mask].index.min()
+            bad_val = df.loc[bad_idx, col]
+            bad_ts = df.loc[bad_idx, "timestamp"].strftime("%Y-%m-%d %H:%M:%S")
+            return None, (
+                f"Ошибка типа данных: некорректное числовое значение '{bad_val}' в колонке '{col}' "
+                f"(время записи: {bad_ts})."
+            )
+
+        # Сохраняем уже очищенную числовую колонку и фиксируем пустые ячейки (NaN)
+        df[col] = converted
+        nan_count = int(df[col].isna().sum())
+        if nan_count > 0:
+            cols_with_nan.append(f"{col} ({nan_count} шт.)")
+            nan_rows_mask = nan_rows_mask | df[col].isna()
+
+    if nan_rows_mask.any():
+        if df["device_id"].isna().any():
+            cols_with_nan.insert(0, f"device_id ({int(df['device_id'].isna().sum())} шт.)")
+        nan_times = df.loc[nan_rows_mask, "timestamp"]
         t_start = nan_times.min().strftime("%Y-%m-%d %H:%M:%S")
         t_end = nan_times.max().strftime("%Y-%m-%d %H:%M:%S")
         time_info = t_start if t_start == t_end else f"в интервале с {t_start} по {t_end}"
 
         return None, (
-            f"Ошибка Е-02 (Пропуски и NaN): обнаружены пустые значения в колонках: {details}."
+            f"Ошибка Е-02 (Пропуски и NaN): обнаружены пустые значения в колонках: {', '.join(cols_with_nan)} "
             f"(время: {time_info})."
         )
 
-    # 5. Проверка разрывов и регулярности шага (Ошибки Е-03 и Е-01)
+    # 5. Проверка разрывов (Ошибка Е-03)
     diffs = df["timestamp"].diff().dropna()
     max_gap = diffs.max()
     if max_gap > pd.Timedelta(minutes=15):
@@ -68,7 +113,7 @@ def validate_telemetry_csv(content: bytes):
             f"(отсутствуют данные с {t_before} по {t_after})."
         )
 
-    # 5. Проверка регулярности шага (Ошибка Е-01)
+    # 6. Проверка регулярности шага (Ошибка Е-01)
     bad_step_mask = diffs.notna() & (diffs != pd.Timedelta(minutes=1))
     if bad_step_mask.any():
         first_bad_idx = diffs[bad_step_mask].index[0]
@@ -79,14 +124,6 @@ def validate_telemetry_csv(content: bytes):
         return None, (
             f"Ошибка Е-01 (Нерегулярный шаг датчика): интервал между записями нарушен "
             f"(ожидается 60 сек., фактически {actual_sec} сек. между {t_prev} и {t_curr})."
-        )
-
-    # 6. Проверка единиц измерения (Ошибка Е-04)
-    # Нормальная температура компрессора ~65 °C; если среднее > 200 — переданы Кельвины или Фаренгейты
-    if df["temperature"].mean() > 200:
-        return None, (
-            f"Ошибка Е-04 (Другая единица измерения): среднее значение температуры ({df['temperature'].mean():.1f}) "
-            "выходит за пределы шкалы Цельсия (возможно, данные переданы в Кельвинах)."
         )
 
     return df, None

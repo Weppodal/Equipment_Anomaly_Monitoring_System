@@ -34,6 +34,7 @@ df = pd.DataFrame({
     "timestamp": timestamps,
     "device_id": device_id,
     "temperature": np.round(temperature, 2),
+    "temperature_unit": "C",
     "vibration": np.round(vibration, 3),
     "current": np.round(current, 2),
     "pressure": np.round(pressure, 2),
@@ -123,7 +124,20 @@ df_gap.to_csv(os.path.join(FIXTURES_DIR, "err_03_long_gap.csv"), index=False)
 # Н-04: Параметр в другой единице измерения (температура в Кельвинах вместо Цельсия: +273.15)
 df_units = df.copy()
 df_units["temperature"] = np.round(df_units["temperature"] + 273.15, 2)
+df_units["temperature_unit"] = "K"
 df_units.to_csv(os.path.join(FIXTURES_DIR, "err_04_wrong_units.csv"), index=False)
+
+# Н-05: Повторные метки времени (Сценарий П-03)
+df_ts_dup = df.copy()
+df_ts_dup.at[2001, "timestamp"] = df_ts_dup.at[2000,"timestamp"]
+df_ts_dup.at[4888, "timestamp"] = df_ts_dup.at[4887, "timestamp"]
+df_ts_dup.to_csv(os.path.join(FIXTURES_DIR, "err_05_duplicate_timestamps.csv"), index=False)
+
+# Н-06: Некорректные числовые значения (текстовый мусор вместо цифры)
+df_bad_num = df.copy()
+df_bad_num["temperature"] = df_bad_num["temperature"].astype(object)
+df_bad_num.at[2500, "temperature"] = "sensor_err"
+df_bad_num.to_csv(os.path.join(FIXTURES_DIR, "err_06_invalid_numbers.csv"), index=False)
 
 print(f"Готово! Файлы сохранены в папку {FIXTURES_DIR}")
 
